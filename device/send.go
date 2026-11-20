@@ -96,19 +96,30 @@ func (peer *Peer) SendKeepalive() {
 }
 
 func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
+	return peer.sendHandshakeInitiation(isRetry, false)
+}
+
+/* sendHandshakeInitiation paces handshake initiations to at most one per
+ * RekeyTimeout, unless immediate is set. immediate is only used for
+ * retries triggered by a valid cookie reply, which are rate limited
+ * separately by cookieRetryState.
+ */
+func (peer *Peer) sendHandshakeInitiation(isRetry bool, immediate bool) error {
 	if !isRetry {
 		peer.timers.handshakeAttempts.Store(0)
 	}
 
-	peer.handshake.mutex.RLock()
-	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
+	if !immediate {
+		peer.handshake.mutex.RLock()
+		if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
+			peer.handshake.mutex.RUnlock()
+			return nil
+		}
 		peer.handshake.mutex.RUnlock()
-		return nil
 	}
-	peer.handshake.mutex.RUnlock()
 
 	peer.handshake.mutex.Lock()
-	if time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
+	if !immediate && time.Since(peer.handshake.lastSentHandshake) < RekeyTimeout {
 		peer.handshake.mutex.Unlock()
 		return nil
 	}
@@ -137,6 +148,74 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersHandshakeInitiated()
 
 	return err
+}
+
+/* cookieRetryState paces handshake retries triggered by received cookie
+ * replies. A valid cookie reply only proves that its sender observed the
+ * MAC1 of our most recent handshake message, so an on-path attacker can
+ * forge replies to prod us into retransmitting. The exponential backoff
+ * and retry cap below keep that amplification bounded, while still
+ * letting a legitimate peer recover within roughly one RTT instead of
+ * waiting for the retransmit timer.
+ */
+type cookieRetryState struct {
+	sync.Mutex
+	lastRetry time.Time     // time of the last cookie-triggered retry
+	backoff   time.Duration // current backoff between retries
+	retries   uint32        // retries since the state was last reset
+}
+
+/* allow reports whether a cookie-triggered retry may be sent now, and if
+ * so, records it and advances the backoff.
+ */
+func (st *cookieRetryState) allow(now time.Time) bool {
+	st.Lock()
+	defer st.Unlock()
+	if st.retries >= MaxCookieRetries {
+		return false
+	}
+	if now.Sub(st.lastRetry) < st.backoff {
+		return false
+	}
+	st.lastRetry = now
+	st.retries++
+	st.backoff *= 2
+	if st.backoff < CookieRetryBackoffMin {
+		st.backoff = CookieRetryBackoffMin
+	} else if st.backoff > CookieRetryBackoffMax {
+		st.backoff = CookieRetryBackoffMax
+	}
+	return true
+}
+
+func (st *cookieRetryState) reset() {
+	st.Lock()
+	st.lastRetry = time.Time{}
+	st.backoff = 0
+	st.retries = 0
+	st.Unlock()
+}
+
+/* retryHandshakeAfterCookie is called after a valid cookie reply was
+ * received from the peer: the peer is under load and has asked us to
+ * retry the handshake with a valid MAC2. Retry promptly so that
+ * legitimate peers recover quickly, but go through cookieRetryState so
+ * that forged cookie replies cannot amplify our handshake rate beyond
+ * the normal retransmit pacing.
+ */
+func (peer *Peer) retryHandshakeAfterCookie() {
+	// Only fast-retry if we have an initiation in flight awaiting a
+	// response. Otherwise the reply is stale, or it answers a response
+	// we sent as responder, in which case the initiator will retry on
+	// its own.
+	if !peer.timers.retransmitHandshake.IsPending() {
+		return
+	}
+	if !peer.cookieRetry.allow(time.Now()) {
+		return
+	}
+	peer.device.log.Verbosef("%v - Retrying handshake after receiving cookie response", peer)
+	peer.sendHandshakeInitiation(true, true)
 }
 
 func (peer *Peer) SendHandshakeResponse() error {

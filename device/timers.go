@@ -84,6 +84,11 @@ func expiredRetransmitHandshake(peer *Peer) {
 			peer.timers.sendKeepalive.Del()
 		}
 
+		/* The handshake episode is over; allow cookie-triggered fast
+		 * retries again for the next one.
+		 */
+		peer.cookieRetry.reset()
+
 		/* We drop all packets without a keypair and don't try again,
 		 * if we try unsuccessfully for too long to make a handshake.
 		 */
@@ -180,6 +185,7 @@ func (peer *Peer) timersHandshakeComplete() {
 	}
 	peer.timers.handshakeAttempts.Store(0)
 	peer.timers.sentLastMinuteHandshake.Store(false)
+	peer.cookieRetry.reset()
 	peer.lastHandshakeNano.Store(time.Now().UnixNano())
 }
 
@@ -210,6 +216,7 @@ func (peer *Peer) timersStart() {
 	peer.timers.handshakeAttempts.Store(0)
 	peer.timers.sentLastMinuteHandshake.Store(false)
 	peer.timers.needAnotherKeepalive.Store(false)
+	peer.cookieRetry.reset()
 }
 
 func (peer *Peer) timersStop() {

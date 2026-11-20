@@ -54,6 +54,7 @@ type Peer struct {
 	}
 
 	cookieGenerator             CookieGenerator
+	cookieRetry                 cookieRetryState
 	trieEntries                 list.List
 	persistentKeepaliveInterval atomic.Uint32
 }

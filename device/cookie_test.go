@@ -7,6 +7,7 @@ package device
 
 import (
 	"testing"
+	"time"
 )
 
 func TestCookieMAC1(t *testing.T) {
@@ -187,4 +188,63 @@ func TestCookieMAC1(t *testing.T) {
 		0x3d, 0x82, 0x31, 0x41, 0xd7, 0x8b, 0x22, 0x7b,
 		0x7d, 0xa1, 0xd5, 0x85, 0x6d, 0xf0, 0x1b, 0xaa,
 	})
+}
+
+func TestCookieRetryBackoff(t *testing.T) {
+	var st cookieRetryState
+	now := time.Now()
+
+	// The first retry after a cookie reply is immediate.
+
+	if !st.allow(now) {
+		t.Fatal("first cookie-triggered retry should be allowed immediately")
+	}
+
+	// An immediate second retry is denied: the backoff has started.
+
+	if st.allow(now) {
+		t.Fatal("back-to-back cookie-triggered retry should be denied")
+	}
+	if st.allow(now.Add(CookieRetryBackoffMin - time.Nanosecond)) {
+		t.Fatal("retry before the backoff elapsed should be denied")
+	}
+
+	// After the backoff elapses, a retry is allowed and the backoff grows.
+
+	if !st.allow(now.Add(CookieRetryBackoffMin)) {
+		t.Fatal("retry after the backoff elapsed should be allowed")
+	}
+	if st.allow(now.Add(2*CookieRetryBackoffMin - time.Nanosecond)) {
+		t.Fatal("backoff should have doubled")
+	}
+	if !st.allow(now.Add(3 * CookieRetryBackoffMin)) {
+		t.Fatal("retry after the doubled backoff elapsed should be allowed")
+	}
+
+	// The backoff is capped.
+
+	now = now.Add(3 * CookieRetryBackoffMin)
+	for i := 0; i < 32; i++ {
+		now = now.Add(CookieRetryBackoffMax)
+		st.allow(now)
+	}
+	if st.backoff > CookieRetryBackoffMax {
+		t.Fatal("backoff should be capped at CookieRetryBackoffMax")
+	}
+
+	// The retry cap is enforced.
+
+	if st.retries > MaxCookieRetries {
+		t.Fatal("retry count exceeded the cap")
+	}
+	if st.allow(now.Add(CookieRetryBackoffMax)) {
+		t.Fatal("retry cap should be enforced")
+	}
+
+	// Resetting restores the initial state.
+
+	st.reset()
+	if !st.allow(now) {
+		t.Fatal("retry should be allowed immediately after reset")
+	}
 }

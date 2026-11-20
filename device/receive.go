@@ -306,7 +306,13 @@ func (device *Device) RoutineHandshake(id int) {
 				device.log.Verbosef("Receiving cookie response from %s", elem.endpoint.DstToString())
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
 					device.log.Verbosef("Could not decrypt invalid cookie response")
+					goto skip
 				}
+				// The peer is under load and asked us to retry with a
+				// valid MAC2. Retry promptly instead of waiting for the
+				// retransmit timer, but with backoff so that forged
+				// cookie replies cannot amplify our handshake rate.
+				peer.retryHandshakeAfterCookie()
 			}
 
 			goto skip
@@ -327,7 +333,15 @@ func (device *Device) RoutineHandshake(id int) {
 				// verify MAC2 field
 
 				if !device.cookieChecker.CheckMAC2(elem.packet, elem.endpoint.DstToBytes()) {
-					device.SendHandshakeCookie(&elem)
+					// Rate limit cookie replies: the reply is sent to
+					// the (possibly spoofed) source address, and MAC1
+					// alone does not authenticate it, since the MAC1
+					// key is derived from our public key. Without the
+					// limiter an attacker could reflect unbounded
+					// cookie replies off of us.
+					if device.rate.limiter.Allow(elem.endpoint.DstIP()) {
+						device.SendHandshakeCookie(&elem)
+					}
 					goto skip
 				}
 
