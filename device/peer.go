@@ -95,6 +95,15 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	handshake.mutex.Lock()
 	handshake.precomputedStaticStatic, _ = device.staticIdentity.privateKey.sharedSecret(pk)
 	handshake.remoteStatic = pk
+	// Inherit anti-replay state from any peer with the same static public
+	// key that was removed earlier (e.g. by an IPC replace_peers reload).
+	// Without this, a captured, pre-reload handshake initiation would pass
+	// the timestamp replay check against a zero-valued lastTimestamp, and
+	// the initiation flood limiter would be reset as well.
+	if retained, ok := device.claimPeerAntiReplayState(pk); ok {
+		handshake.lastTimestamp = retained.lastTimestamp
+		handshake.lastInitiationConsumption = retained.lastInitiationConsumption
+	}
 	handshake.mutex.Unlock()
 
 	// reset endpoint

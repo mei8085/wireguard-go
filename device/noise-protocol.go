@@ -382,10 +382,10 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 
 	var timestamp tai64n.Timestamp
 
-	handshake.mutex.RLock()
+	handshake.mutex.Lock()
+	defer handshake.mutex.Unlock()
 
 	if isZero(handshake.precomputedStaticStatic[:]) {
-		handshake.mutex.RUnlock()
 		return nil
 	}
 	KDF2(
@@ -397,16 +397,17 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	aead, _ = chacha20poly1305.New(key[:])
 	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
 	if err != nil {
-		handshake.mutex.RUnlock()
 		return nil
 	}
 	mixHash(&hash, &hash, msg.Timestamp[:])
 
-	// protect against replay & flood
-
+	// protect against replay & flood.
+	// Both checks and the corresponding state updates happen inside the
+	// same critical section: otherwise two concurrent initiations could
+	// each observe the stale state before either of them updates it, and
+	// both would be accepted.
 	replay := !timestamp.After(handshake.lastTimestamp)
 	flood := time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate
-	handshake.mutex.RUnlock()
 	if replay {
 		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake replay @ %v", peer, timestamp)
 		return nil
@@ -417,8 +418,6 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	}
 
 	// update handshake state
-
-	handshake.mutex.Lock()
 
 	handshake.hash = hash
 	handshake.chainKey = chainKey
@@ -432,8 +431,6 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 		handshake.lastInitiationConsumption = now
 	}
 	handshake.state = handshakeInitiationConsumed
-
-	handshake.mutex.Unlock()
 
 	setZero(hash[:])
 	setZero(chainKey[:])

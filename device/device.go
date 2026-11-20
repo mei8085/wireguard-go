@@ -58,6 +58,14 @@ type Device struct {
 		keyMap       map[NoisePublicKey]*Peer
 	}
 
+	// peerTombstones retains handshake anti-replay state (last accepted
+	// initiation timestamp and last initiation consumption time) for peers
+	// that were removed, so that re-creating a peer with the same static
+	// public key during a configuration reload does not reopen a replay
+	// window. See peer_tombstone.go.
+	peerTombstonesMu sync.Mutex
+	peerTombstones   map[NoisePublicKey]handshakeAntiReplayState
+
 	rate struct {
 		underLoadUntil atomic.Int64
 		limiter        ratelimiter.Ratelimiter
@@ -130,6 +138,12 @@ func removePeerLocked(device *Device, peer *Peer, key NoisePublicKey) {
 	// stop routing and processing of packets
 	device.allowedips.RemoveByPeer(peer)
 	peer.Stop()
+
+	// Retain the handshake anti-replay state so that a peer re-created with
+	// the same static public key (e.g. after an IPC replace_peers reload)
+	// cannot be tricked into accepting a replayed, pre-reload handshake
+	// initiation or re-using a consumed initiation rate slot.
+	device.retirePeerAntiReplayState(peer)
 
 	// remove from peer map
 	delete(device.peers.keyMap, key)
@@ -295,6 +309,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	}
 	device.tun.mtu.Store(int32(mtu))
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
+	device.peerTombstones = make(map[NoisePublicKey]handshakeAntiReplayState)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
 
@@ -384,6 +399,7 @@ func (device *Device) Close() {
 	// Remove peers before closing queues,
 	// because peers assume that queues are active.
 	device.RemoveAllPeers()
+	device.clearPeerAntiReplayTombstones()
 
 	// We kept a reference to the encryption and decryption queues,
 	// in case we started any new peers that might write to them.
