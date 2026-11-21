@@ -214,6 +214,7 @@ type Handshake struct {
 	hash                      [blake2s.Size]byte       // hash value
 	chainKey                  [blake2s.Size]byte       // chain key
 	presharedKey              NoisePresharedKey        // psk
+	keyGeneration             uint64                   // key generation this handshake belongs to
 	localEphemeral            NoisePrivateKey          // ephemeral secret key
 	localIndex                uint32                   // used to clear hash-table
 	remoteIndex               uint32                   // index for sending
@@ -224,6 +225,8 @@ type Handshake struct {
 	lastInitiationConsumption time.Time
 	lastSentHandshake         time.Time
 }
+
+var errRetiredKeyGeneration = errors.New("handshake belongs to a retired key generation")
 
 var (
 	InitialChainKey [blake2s.Size]byte
@@ -279,6 +282,7 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 	var err error
 	handshake.hash = InitialHash
 	handshake.chainKey = InitialChainKey
+	handshake.keyGeneration = peer.keyGeneration.Load()
 	handshake.localEphemeral, err = newPrivateKey()
 	if err != nil {
 		return nil, err
@@ -422,6 +426,7 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 
 	handshake.hash = hash
 	handshake.chainKey = chainKey
+	handshake.keyGeneration = peer.keyGeneration.Load()
 	handshake.remoteIndex = msg.Sender
 	handshake.remoteEphemeral = msg.Ephemeral
 	if timestamp.After(handshake.lastTimestamp) {
@@ -650,6 +655,19 @@ func (peer *Peer) BeginSymmetricSession() error {
 		return fmt.Errorf("invalid state for keypair derivation: %v", handshake.state)
 	}
 
+	// If the preshared key was rotated while this handshake was in
+	// progress, the handshake belongs to a retired key generation and
+	// any keypair derived from it must be discarded, so that sessions
+	// referencing the old preshared key cannot be established.
+
+	if handshake.keyGeneration != peer.keyGeneration.Load() {
+		setZero(handshake.chainKey[:])
+		setZero(handshake.hash[:])
+		setZero(handshake.localEphemeral[:])
+		handshake.state = handshakeZeroed
+		return errRetiredKeyGeneration
+	}
+
 	// zero handshake
 
 	setZero(handshake.chainKey[:])
@@ -671,6 +689,7 @@ func (peer *Peer) BeginSymmetricSession() error {
 	keypair.isInitiator = isInitiator
 	keypair.localIndex = peer.handshake.localIndex
 	keypair.remoteIndex = peer.handshake.remoteIndex
+	keypair.keyGeneration = handshake.keyGeneration
 
 	// remap index
 

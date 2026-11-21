@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
+	"golang.zx2c4.com/wireguard/tai64n"
 )
 
 type Peer struct {
@@ -24,6 +25,12 @@ type Peer struct {
 	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
 	rxBytes           atomic.Uint64  // bytes received from peer
 	lastHandshakeNano atomic.Int64   // nano seconds since epoch
+	// keyGeneration is the current preshared-key generation. It is
+	// incremented every time the preshared key is rotated. Handshakes
+	// and keypairs (and thereby packet counters and replay state) are
+	// tagged with the generation they belong to; state tagged with an
+	// older generation is retired.
+	keyGeneration atomic.Uint64
 
 	endpoint struct {
 		sync.Mutex
@@ -254,6 +261,76 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 		next.sendNonce.Store(RejectAfterMessages)
 	}
 	keypairs.Unlock()
+}
+
+// UpdatePresharedKey replaces the peer's preshared key. When the key
+// changes, the peer's key generation is advanced: any in-progress
+// handshake is aborted and every keypair derived from an older
+// generation is retired, so that new sessions are derived from the new
+// preshared key and sessions referencing the old key can neither send
+// nor receive.
+func (peer *Peer) UpdatePresharedKey(psk NoisePresharedKey) {
+	handshake := &peer.handshake
+	handshake.mutex.Lock()
+	if psk == handshake.presharedKey {
+		handshake.mutex.Unlock()
+		return
+	}
+	handshake.presharedKey = psk
+	peer.keyGeneration.Add(1)
+
+	// Abort any in-progress handshake: it belongs to the retired key
+	// generation and must not complete.
+	peer.device.indexTable.Delete(handshake.localIndex)
+	handshake.Clear()
+
+	// Open a new replay epoch for the new generation. Handshakes of the
+	// retired generation can no longer produce keypairs (they are
+	// rejected by the generation check in BeginSymmetricSession), so
+	// their timestamps and consumption times must not gate the
+	// handshakes that replace them. Without this, an immediate
+	// re-initiation could fall into the same whitened tai64n timestamp
+	// window as the last pre-rotation handshake and be rejected as a
+	// replay, stalling the new session until the retransmit timeout.
+	handshake.lastTimestamp = tai64n.Timestamp{}
+	handshake.lastInitiationConsumption = time.Time{}
+
+	// Allow a new handshake to be initiated immediately, so that a
+	// session derived from the new preshared key is established
+	// without delay.
+	handshake.lastSentHandshake = time.Now().Add(-(RekeyTimeout + time.Second))
+	handshake.mutex.Unlock()
+
+	peer.retireOldKeypairs()
+}
+
+// retireOldKeypairs retires every keypair whose key generation is older
+// than the peer's current generation. Retired keypairs are removed from
+// the index table, so incoming packets referencing them are rejected,
+// and their send nonce is exhausted, so no further packets are sent
+// with them.
+func (peer *Peer) retireOldKeypairs() {
+	device := peer.device
+	generation := peer.keyGeneration.Load()
+
+	keypairs := &peer.keypairs
+	keypairs.Lock()
+	defer keypairs.Unlock()
+
+	if keypairs.previous != nil && keypairs.previous.keyGeneration < generation {
+		device.DeleteKeypair(keypairs.previous)
+		keypairs.previous = nil
+	}
+	if keypairs.current != nil && keypairs.current.keyGeneration < generation {
+		keypairs.current.sendNonce.Store(RejectAfterMessages)
+		device.DeleteKeypair(keypairs.current)
+		keypairs.current = nil
+	}
+	if next := keypairs.next.Load(); next != nil && next.keyGeneration < generation {
+		next.sendNonce.Store(RejectAfterMessages)
+		device.DeleteKeypair(next)
+		keypairs.next.Store(nil)
+	}
 }
 
 func (peer *Peer) Stop() {

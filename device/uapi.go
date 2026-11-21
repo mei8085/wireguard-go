@@ -329,12 +329,16 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 	case "preshared_key":
 		device.log.Verbosef("%v - UAPI: Updating preshared key", peer.Peer)
 
-		peer.handshake.mutex.Lock()
-		err := peer.handshake.presharedKey.FromHex(value)
-		peer.handshake.mutex.Unlock()
-
-		if err != nil {
+		var psk NoisePresharedKey
+		if err := psk.FromHex(value); err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set preshared key: %w", err)
+		}
+		if peer.dummy {
+			peer.handshake.mutex.Lock()
+			peer.handshake.presharedKey = psk
+			peer.handshake.mutex.Unlock()
+		} else {
+			peer.UpdatePresharedKey(psk)
 		}
 
 	case "endpoint":

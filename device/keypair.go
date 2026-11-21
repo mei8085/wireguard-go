@@ -30,6 +30,10 @@ type Keypair struct {
 	created      time.Time
 	localIndex   uint32
 	remoteIndex  uint32
+	// keyGeneration identifies the preshared-key generation this
+	// keypair (including its send nonce and replay filter) was
+	// derived from. Keypairs from retired generations are rejected.
+	keyGeneration uint64
 }
 
 type Keypairs struct {
