@@ -189,11 +189,24 @@ func (trie parentIndirection) insert(ip []byte, cidr uint8, peer *Peer) {
 }
 
 func (node *trieEntry) lookup(ip []byte) *Peer {
+	peer, _ := node.lookupAttributed(ip)
+	return peer
+}
+
+// lookupAttributed walks the trie following ip and returns the deepest
+// matching node that carries a peer (the longest-prefix match) together with
+// its configured prefix. The returned prefix is the explicit basis of the
+// address-to-peer attribution; callers surface it in security decisions and
+// logs. A nil peer with a zero prefix means no entry matched.
+func (node *trieEntry) lookupAttributed(ip []byte) (*Peer, netip.Prefix) {
 	var found *Peer
+	var foundPrefix netip.Prefix
 	size := uint8(len(ip))
 	for node != nil && commonBits(node.bits, ip) >= node.cidr {
 		if node.peer != nil {
 			found = node.peer
+			addr, _ := netip.AddrFromSlice(node.bits)
+			foundPrefix = netip.PrefixFrom(addr, int(node.cidr))
 		}
 		if node.bitAtByte == size {
 			break
@@ -201,7 +214,7 @@ func (node *trieEntry) lookup(ip []byte) *Peer {
 		bit := node.choose(ip)
 		node = node.child[bit]
 	}
-	return found
+	return found, foundPrefix
 }
 
 type AllowedIPs struct {
@@ -304,13 +317,29 @@ func (table *AllowedIPs) Insert(prefix netip.Prefix, peer *Peer) {
 }
 
 func (table *AllowedIPs) Lookup(ip []byte) *Peer {
+	peer, _ := table.LookupWithPrefix(ip)
+	return peer
+}
+
+// LookupWithPrefix attributes ip to a peer using the longest-prefix AllowedIP
+// match and additionally returns the exact prefix that produced the
+// attribution. It is the encrypted-routing ownership decision point:
+//
+//   - send.go uses it to select the cryptographic peer for an outbound
+//     packet and to record the routing basis;
+//   - receive.go uses it to verify that an inbound packet's source address
+//     belongs to the peer that delivered it.
+//
+// A nil peer with a zero netip.Prefix means the address is not covered by
+// any configured AllowedIP entry.
+func (table *AllowedIPs) LookupWithPrefix(ip []byte) (*Peer, netip.Prefix) {
 	table.mutex.RLock()
 	defer table.mutex.RUnlock()
 	switch len(ip) {
 	case net.IPv6len:
-		return table.IPv6.lookup(ip)
+		return table.IPv6.lookupAttributed(ip)
 	case net.IPv4len:
-		return table.IPv4.lookup(ip)
+		return table.IPv4.lookupAttributed(ip)
 	default:
 		panic(errors.New("looking up unknown address type"))
 	}

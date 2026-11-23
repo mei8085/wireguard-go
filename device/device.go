@@ -67,6 +67,11 @@ type Device struct {
 	indexTable    IndexTable
 	cookieChecker CookieChecker
 
+	// security holds the central-node security policy (peer isolation
+	// switch and routing decision counters). Its zero value is a valid
+	// permissive policy, so no explicit initialization is required.
+	security securityPolicy
+
 	pool struct {
 		inboundElementsContainer  *WaitPool
 		outboundElementsContainer *WaitPool

@@ -471,39 +471,55 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			switch elem.packet[0] >> 4 {
 			case 4:
 				if len(elem.packet) < ipv4.HeaderLen {
+					device.recordDrop(RouteDroppedTruncated,
+						"IPv4 packet shorter than header from "+peer.String())
 					continue
 				}
 				field := elem.packet[IPv4offsetTotalLength : IPv4offsetTotalLength+2]
 				length := binary.BigEndian.Uint16(field)
 				if int(length) > len(elem.packet) || int(length) < ipv4.HeaderLen {
+					device.recordDrop(RouteDroppedTruncated,
+						"IPv4 packet with inconsistent total length from "+peer.String())
 					continue
 				}
 				elem.packet = elem.packet[:length]
-				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
-				if device.allowedips.Lookup(src) != peer {
-					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
-					continue
-				}
 
 			case 6:
 				if len(elem.packet) < ipv6.HeaderLen {
+					device.recordDrop(RouteDroppedTruncated,
+						"IPv6 packet shorter than header from "+peer.String())
 					continue
 				}
 				field := elem.packet[IPv6offsetPayloadLength : IPv6offsetPayloadLength+2]
 				length := uint32(binary.BigEndian.Uint16(field))
 				length += ipv6.HeaderLen
 				if int(length) > len(elem.packet) {
+					device.recordDrop(RouteDroppedTruncated,
+						"IPv6 packet with inconsistent payload length from "+peer.String())
 					continue
 				}
 				elem.packet = elem.packet[:length]
-				src := elem.packet[IPv6offsetSrc : IPv6offsetSrc+net.IPv6len]
-				if device.allowedips.Lookup(src) != peer {
-					device.log.Verbosef("IPv6 packet with disallowed source address from %v", peer)
-					continue
-				}
 
 			default:
-				device.log.Verbosef("Packet with invalid IP version from %v", peer)
+				device.recordDrop(RouteDroppedInvalidVersion,
+					"packet with invalid IP version from "+peer.String())
+				continue
+			}
+
+			// Central-node security boundary.
+			//
+			// The packet was decrypted and authenticated as coming from
+			// peer. classifyInboundPacket verifies the inner source
+			// address class, checks that the AllowedIP trie attributes
+			// that source to this very peer, and, when peer isolation is
+			// enabled, blocks traffic destined for another peer's
+			// address space. The matched prefix is the explicit basis
+			// recorded for any accepted packet.
+			decision := device.classifyInboundPacket(peer, elem.packet)
+			if decision.Verdict != RouteAccepted {
+				device.recordDrop(decision.Verdict,
+					"inbound packet from "+peer.String()+
+						": source ownership check failed")
 				continue
 			}
 

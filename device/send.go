@@ -8,14 +8,11 @@ package device
 import (
 	"encoding/binary"
 	"errors"
-	"net"
 	"os"
 	"sync"
 	"time"
 
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -248,30 +245,23 @@ func (device *Device) RoutineReadFromTUN() {
 			elem := elems[i]
 			elem.packet = bufs[i][offset : offset+sizes[i]]
 
-			// lookup peer
-			var peer *Peer
-			switch elem.packet[0] >> 4 {
-			case 4:
-				if len(elem.packet) < ipv4.HeaderLen {
-					continue
-				}
-				dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
-				peer = device.allowedips.Lookup(dst)
-
-			case 6:
-				if len(elem.packet) < ipv6.HeaderLen {
-					continue
-				}
-				dst := elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
-				peer = device.allowedips.Lookup(dst)
-
-			default:
-				device.log.Verbosef("Received packet with unknown IP version")
-			}
-
-			if peer == nil {
+			// Central-node security boundary.
+			//
+			// The destination address is read straight from the IP
+			// header and attributed to a peer through the AllowedIP trie.
+			// classifyOutboundPacket returns the matched prefix (the
+			// routing basis), rejects malformed or unroutable packets,
+			// and, when peer isolation is enabled, blocks a packet that
+			// would leave for a different peer than the one owning the
+			// source address.
+			decision := device.classifyOutboundPacket(elem.packet)
+			if decision.Verdict != RouteAccepted {
+				device.recordDrop(decision.Verdict,
+					"outbound packet: encrypted routing attribution failed")
 				continue
 			}
+			peer := decision.Peer
+
 			elemsForPeer, ok := elemsByPeer[peer]
 			if !ok {
 				elemsForPeer = device.GetOutboundElementsContainer()

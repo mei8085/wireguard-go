@@ -97,6 +97,12 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			sendf("fwmark=%d", device.net.fwmark)
 		}
 
+		// Security policy state. Emitted as a device-level line before
+		// the peer blocks, in the same key=value text format as every
+		// other UAPI field, so existing parsers that ignore unknown keys
+		// keep working while new consumers can verify the active rule.
+		sendf("peer_isolation=%t", device.PeerIsolationEnabled())
+
 		for _, peer := range device.peers.keyMap {
 			// Serialize peer state.
 			peer.handshake.mutex.RLock()
@@ -239,6 +245,17 @@ func (device *Device) handleDeviceLine(key, value string) error {
 		}
 		device.log.Verbosef("UAPI: Removing all peers")
 		device.RemoveAllPeers()
+
+	case "peer_isolation":
+		// Central-node security switch. It is parsed strictly: only
+		// strconv.ParseBool values are accepted, and the atomic store
+		// takes effect for every subsequent packet without a restart.
+		enabled, err := strconv.ParseBool(value)
+		if err != nil {
+			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set peer_isolation, invalid value: %v", value)
+		}
+		device.log.Verbosef("UAPI: Updating peer isolation")
+		device.SetPeerIsolation(enabled)
 
 	default:
 		return ipcErrorf(ipc.IpcErrorInvalid, "invalid UAPI device key: %v", key)
